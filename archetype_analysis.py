@@ -18,7 +18,7 @@ N/A zone enforcement (per framework slide):
 
 Data notes (synthetic master.csv):
   - nooftreatmentitems_nhs_standard / _referral columns are all zero.
-    NHS activity is proxied via UDA counts x 28 (standard UDA rate).
+    NHS income is taken directly from the nhsincome column.
   - countof_snareid and chargeprice_private_referral are all zero.
     Specialist/Referral Hub is proxied via hygienist presence + private
     income intensity.
@@ -36,7 +36,6 @@ RANDOM_STATE = 42
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
-NHS_VALUE_PER_UDA = 28.0          # £ per UDA (standard proxy)
 NA_ZONE_PAIRS = {                 # (model, size) combinations that are invalid
     ("NHS Led", "Large/Advanced"),
     ("NHS Led", "Flagship"),
@@ -55,7 +54,7 @@ def load_and_engineer(path: str = "master.csv") -> pd.DataFrame:
     df = pd.read_csv(path)
 
     # ── Income ────────────────────────────────────────────────────────────────
-    df["nhs_income_est"]   = df["uda"].fillna(0) * NHS_VALUE_PER_UDA
+    df["nhs_income_est"]   = df["nhsincome"].fillna(0)
     df["private_income"]   = df["privateincome"].fillna(0)
     df["total_income_est"] = df["private_income"] + df["nhs_income_est"]
 
@@ -68,7 +67,7 @@ def load_and_engineer(path: str = "master.csv") -> pd.DataFrame:
     # ── Activity ──────────────────────────────────────────────────────────────
     df["items_per_surgery"]  = df["nooftreatmentitems"] / df["numberofsurgeries"].replace(0, np.nan)
     df["income_per_surgery"] = df["total_income_est"]   / df["numberofsurgeries"].replace(0, np.nan)
-    df["uda_per_dentist"]    = df["uda"]                / df["position_dentist"].replace(0, np.nan)
+    df["nhs_income_per_dentist"] = df["nhsincome"]      / df["position_dentist"].replace(0, np.nan)
 
     # ── Specialist proxy (hygienist presence + private intensity) ─────────────
     df["has_hygienist"]            = df["position_hygienist"] > 0
@@ -269,14 +268,14 @@ def apply_clustering(df: pd.DataFrame) -> pd.DataFrame:
 AFFINITY_WEIGHTS = {
     "NHS Led": {
         "nhs_share_score":       0.50,
-        "uda_score":             0.30,
+        "nhs_income_score":             0.30,
         "anti_specialist_score": 0.20,
     },
     "Balanced Mixed": {
         "balance_score":           0.60,
         "anti_specialist_score":   0.20,
         "private_intensity_score": 0.10,
-        "uda_score":               0.10,
+        "nhs_income_score":               0.10,
     },
     "Private Led Mixed": {
         "private_share_score":     0.45,
@@ -329,7 +328,7 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     df["nhs_share_score"]         = _pct_rank(df["nhs_share"])
     df["private_share_score"]     = _pct_rank(1 - df["nhs_share"].fillna(0))
     df["private_intensity_score"] = _pct_rank(df["private_income_per_chair"])
-    df["uda_score"]               = _pct_rank(df["uda"])
+    df["nhs_income_score"]               = _pct_rank(df["nhsincome"])
     df["specialist_score"]        = _pct_rank(df["specialist_flag"].astype(float) * 0.5
                                               + df["private_income_per_chair"].rank(pct=True).fillna(0) * 0.5)
     df["anti_specialist_score"]   = 100 - df["specialist_score"]
@@ -457,7 +456,6 @@ def print_archetype_profiles(df: pd.DataFrame) -> None:
                 avg_total_income=("total_income_est", "mean"),
                 avg_nhs_share_pct=("nhs_share", lambda x: x.mean() * 100),
                 avg_treatment_items=("nooftreatmentitems", "mean"),
-                avg_uda=("uda", "mean"),
             )
             .round(1)
             .sort_index()
@@ -493,7 +491,7 @@ def main(input_path: str = "master.csv", output_path: str = "master_archetypes.c
     output_cols = [
         "practicekey", "practicename", "region", "numberofsurgeries",
         "unique_staff_ids", "private_income", "nhs_income_est", "total_income_est",
-        "nhs_share", "uda", "nooftreatmentitems",
+        "nhs_share", "nhsincome", "nooftreatmentitems",
         "items_per_surgery", "income_per_surgery",
         "has_hygienist", "specialist_flag",
         "archetype_size_rules", "archetype_model_rules", "archetype_rules",

@@ -48,7 +48,7 @@ noofpatients_private_standard, noofpatients_private_referral,
 noofpatients_nhs_standard, noofpatients_nhs_referral,
 chargeprice_private_standard, chargeprice_private_referral,
 chargeprice_nhs_standard, chargeprice_nhs_referral,
-monthkey_y, privateincome, uda, latest_month_y, countof_snareid
+monthkey_y, privateincome, nhsincome, latest_month_y, countof_snareid
 ```
 
 Any extra columns in your export are ignored. Missing columns will default to zero — check the **Data notes** section below before running.
@@ -112,7 +112,7 @@ Run all cells top-to-bottom (**Kernel → Restart & Run All**). This notebook co
 
 ### Model bands
 
-NHS share of income is calculated as `(uda × £28) / (uda × £28 + privateincome)`.  
+NHS share of income is calculated as `nhsincome / (nhsincome + privateincome)`.  
 Thresholds are percentile-anchored to the data distribution so segments remain balanced when the NHS/private split shifts with real data.
 
 | Band | Signal |
@@ -163,14 +163,6 @@ def _rules_model(df):
     ...
 ```
 
-### NHS value per UDA
-
-The `£28 per UDA` rate used to estimate NHS income is set at the top of the script:
-
-```python
-NHS_VALUE_PER_UDA = 28.0   # update to match current contracted rate
-```
-
 ### Clustering
 
 The number of clusters (default 4 for both size and model) is controlled by the `n_clusters` argument in `apply_clustering()`. Increase to 5 if you need finer granularity, or reduce to 3 for a simpler view.
@@ -191,7 +183,7 @@ The size index weights are in `SIZE_WEIGHTS` / `SIZE_INDEX_WEIGHTS`. Size bands 
 | 2 · NHS vs Private Mix & Revenue | Income share distributions, regional stacked revenue, practice segments |
 | 3 · Standard vs Specialist Referral | Referral rate distribution, NHS vs private split, regional comparison |
 | 4 · Workforce Mix & Role Design | Headcount by role, nurse:dentist ratio, hygienist penetration |
-| 5 · Capacity & Productivity | Treatment items/income per surgery, UDAs per dentist, whitespace sizing |
+| 5 · Capacity & Productivity | Treatment items/income per surgery, NHS income per dentist, whitespace sizing |
 | Summary Dashboard | Portfolio-level KPI table |
 
 ## Approach notebook summaries
