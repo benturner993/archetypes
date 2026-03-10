@@ -11,9 +11,15 @@ A two-stage analytical pipeline that:
 | File | Purpose |
 |------|---------|
 | `master.csv` | Input data — one row per practice (replace with real data) |
-| `archetype_analysis.py` | Standalone script: rules, clustering, and modelling |
-| `eda_practices.ipynb` | Notebook: full EDA across all five dimensions + archetypes section |
-| `master_archetypes.csv` | Output: enriched dataset with archetype labels and performance tiers |
+| `eda_practices.ipynb` | Exploratory analysis across five operational dimensions |
+| `01_rules_based.ipynb` | Approach 1: deterministic threshold classification |
+| `02_clustering.ipynb` | Approach 2: unsupervised K-Means classification |
+| `03_modelling.ipynb` | Approach 3: XGBoost income modelling + outlier detection |
+| `archetype_analysis.py` | Standalone script that runs all three approaches in sequence |
+| `archetypes_rules.csv` | Output from `01_rules_based.ipynb` |
+| `archetypes_clustering.csv` | Output from `02_clustering.ipynb` |
+| `archetypes_modelling.csv` | Output from `03_modelling.ipynb` |
+| `master_archetypes.csv` | Combined output from `archetype_analysis.py` |
 | `create_data.py` | Synthetic data generator (development/testing only) |
 | `create_metadata.py` | Schema reference (development/testing only) |
 
@@ -50,37 +56,38 @@ Any extra columns in your export are ignored. Missing columns will default to ze
 ### 2 · Install dependencies
 
 ```bash
-pip install pandas numpy matplotlib seaborn scikit-learn
+pip install pandas numpy matplotlib seaborn scikit-learn xgboost
 ```
 
-Tested with: `pandas 2.0.3` · `numpy 1.21.2` · `matplotlib 3.7.5` · `seaborn 0.11.1` · `scikit-learn 1.3.2`
+Tested with: `pandas 2.0.3` · `numpy 1.21.2` · `matplotlib 3.7.5` · `seaborn 0.11.1` · `scikit-learn 1.3.2` · `xgboost 2.1.4`
 
-### 3 · Run the archetype script
+### 3 · Choose how to run the analysis
+
+**Option A — Individual approach notebooks (recommended for exploration)**
+
+Run each notebook independently in Jupyter. They are self-contained and can be run in any order, though `02_clustering.ipynb` and `03_modelling.ipynb` will optionally load `archetypes_rules.csv` produced by `01_rules_based.ipynb` for comparison views.
+
+```bash
+jupyter notebook 01_rules_based.ipynb
+jupyter notebook 02_clustering.ipynb
+jupyter notebook 03_modelling.ipynb
+```
+
+Each notebook saves its own output CSV:
+
+| Notebook | Output file | Key columns |
+|----------|-------------|-------------|
+| `01_rules_based.ipynb` | `archetypes_rules.csv` | `archetype_size`, `archetype_model`, `archetype_rules` |
+| `02_clustering.ipynb` | `archetypes_clustering.csv` | `cluster_size_id`, `cluster_model_id`, `archetype_size`, `archetype_model` |
+| `03_modelling.ipynb` | `archetypes_modelling.csv` | `predicted_income`, `income_residual`, `residual_z`, `predicted_performance_tier` |
+
+**Option B — Run all three at once via the script**
 
 ```bash
 python archetype_analysis.py
 ```
 
-This prints three sections to the terminal:
-- Linear regression coefficients + R² for total income
-- Random Forest feature importances
-- Outlier summary (practices > 2 standard deviations from predicted income)
-
-And writes **`master_archetypes.csv`** with 26 columns, including:
-
-| Column | Description |
-|--------|-------------|
-| `archetype_size_rules` | Rules-based size band |
-| `archetype_model_rules` | Rules-based model band (N/A zones enforced) |
-| `archetype_rules` | Combined `Size \| Model` label |
-| `cluster_size_id` | Raw K-Means cluster id for size (0–3) |
-| `cluster_model_id` | Raw K-Means cluster id for model (0–3) |
-| `archetype_size_clust` | Clustering size label |
-| `archetype_model_clust` | Clustering model label |
-| `archetype_clust` | Combined clustering label |
-| `predicted_income` | RF-predicted total income (£) |
-| `income_residual` | Actual minus predicted (£) |
-| `predicted_performance_tier` | `High Outlier` / `Expected` / `Low Outlier` |
+Writes `master_archetypes.csv` with all columns from all three approaches combined.
 
 ### 4 · Open the EDA notebook
 
@@ -88,7 +95,7 @@ And writes **`master_archetypes.csv`** with 26 columns, including:
 jupyter notebook eda_practices.ipynb
 ```
 
-Run all cells top-to-bottom (**Kernel → Restart & Run All**). Section 6 automatically calls `archetype_analysis.py` and loads `master_archetypes.csv`, so run the notebook after completing step 3, or let the notebook trigger the script itself via the subprocess call in cell 28.
+Run all cells top-to-bottom (**Kernel → Restart & Run All**). This notebook covers the five exploratory dimensions only and does not depend on any of the archetype approach notebooks.
 
 ---
 
@@ -170,7 +177,7 @@ The number of clusters (default 4 for both size and model) is controlled by the 
 
 ---
 
-## EDA notebook sections
+## EDA notebook sections (`eda_practices.ipynb`)
 
 | Section | What it covers |
 |---------|---------------|
@@ -179,5 +186,12 @@ The number of clusters (default 4 for both size and model) is controlled by the 
 | 3 · Standard vs Specialist Referral | Referral rate distribution, NHS vs private split, regional comparison |
 | 4 · Workforce Mix & Role Design | Headcount by role, nurse:dentist ratio, hygienist penetration |
 | 5 · Capacity & Productivity | Treatment items/income per surgery, UDAs per dentist, whitespace sizing |
-| 6 · Archetypes Framework | 16-cell heatmaps, profile charts, Rules vs Clustering agreement, outlier spotlight, whitespace by archetype |
 | Summary Dashboard | Portfolio-level KPI table |
+
+## Approach notebook summaries
+
+| Notebook | Approach | When to use |
+|----------|----------|-------------|
+| `01_rules_based.ipynb` | Hard-coded thresholds on surgeries and NHS share | Default classification; easy to explain to stakeholders; stable across data refreshes |
+| `02_clustering.ipynb` | K-Means on standardised features (k=4) | Validate rules; discover natural groupings; explore if real data reveals different structure |
+| `03_modelling.ipynb` | XGBoost income model + z-score outlier flagging | Identify over- and under-performers; understand which features drive income; prioritise interventions |

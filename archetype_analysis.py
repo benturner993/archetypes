@@ -32,9 +32,9 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import cross_val_score
 from sklearn.metrics import r2_score
+from xgboost import XGBRegressor
 
 warnings.filterwarnings("ignore")
 RANDOM_STATE = 42
@@ -284,9 +284,9 @@ def apply_modeling(df: pd.DataFrame) -> pd.DataFrame:
                                    based on standardised residual (|z| > 2)
 
     Also prints:
-      • Linear Regression: coefficients + R² for total income
-      • Random Forest: feature importances for total income
-      • Outlier summary
+      - Linear Regression: coefficients + R2 for total income
+      - XGBoost: feature importances for total income
+      - Outlier summary
 
     Note: NPS is constant in the synthetic data and cannot be modelled.
     total_income_est is used as the performance target instead.
@@ -313,9 +313,9 @@ def apply_modeling(df: pd.DataFrame) -> pd.DataFrame:
     r2_lr         = r2_score(y, y_pred_lr)
     cv_r2_lr      = cross_val_score(lr, X, y, cv=5, scoring="r2").mean()
 
-    print("\n" + "═" * 60)
-    print("LINEAR REGRESSION — Total income drivers")
-    print("═" * 60)
+    print("\n" + "-" * 60)
+    print("LINEAR REGRESSION -- Total income drivers")
+    print("-" * 60)
     coef_df = (
         pd.DataFrame({"feature": base_features, "coefficient": lr.coef_})
         .sort_values("coefficient", key=abs, ascending=False)
@@ -324,24 +324,32 @@ def apply_modeling(df: pd.DataFrame) -> pd.DataFrame:
     print(f"\nIntercept : £{lr.intercept_:,.0f}")
     print(f"R²        : {r2_lr:.3f}  (5-fold CV R²: {cv_r2_lr:.3f})")
 
-    # ── Random Forest ────────────────────────────────────────────────────────
-    rf = RandomForestRegressor(n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1)
-    rf.fit(X, y)
-    cv_r2_rf = cross_val_score(rf, X, y, cv=5, scoring="r2").mean()
+    # ── XGBoost ──────────────────────────────────────────────────────────────
+    xgb = XGBRegressor(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=RANDOM_STATE,
+        verbosity=0,
+    )
+    xgb.fit(X, y)
+    cv_r2_xgb = cross_val_score(xgb, X, y, cv=5, scoring="r2").mean()
 
-    print("\n" + "═" * 60)
-    print("RANDOM FOREST — Feature importances for total income")
-    print("═" * 60)
+    print("\n" + "-" * 60)
+    print("XGBOOST -- Feature importances for total income")
+    print("-" * 60)
     imp_df = (
-        pd.DataFrame({"feature": base_features, "importance": rf.feature_importances_})
+        pd.DataFrame({"feature": base_features, "importance": xgb.feature_importances_})
         .sort_values("importance", ascending=False)
     )
     print(imp_df.to_string(index=False))
-    print(f"\n5-fold CV R² : {cv_r2_rf:.3f}")
+    print(f"\n5-fold CV R2 : {cv_r2_xgb:.3f}")
 
     # ── Outlier detection ────────────────────────────────────────────────────
-    # Use RF predictions (more accurate) as the baseline
-    y_pred_rf    = rf.predict(X)
+    # Use XGBoost predictions as the performance baseline
+    y_pred_rf    = xgb.predict(X)
     residuals    = y - y_pred_rf
     resid_z      = (residuals - residuals.mean()) / residuals.std()
 
@@ -349,14 +357,15 @@ def apply_modeling(df: pd.DataFrame) -> pd.DataFrame:
     tier[resid_z >  2] = "High Outlier"
     tier[resid_z < -2] = "Low Outlier"
 
-    df["predicted_income"]            = np.round(y_pred_rf, 2)
+    y_pred_xgb = y_pred_rf  # alias for clarity in downstream code
+    df["predicted_income"]            = np.round(y_pred_xgb, 2)
     df["income_residual"]             = np.round(residuals, 2)
     df["predicted_performance_tier"]  = tier
 
     outlier_summary = tier.value_counts()
-    print("\n" + "═" * 60)
+    print("\n" + "-" * 60)
     print("OUTLIER SUMMARY (|z-residual| > 2)")
-    print("═" * 60)
+    print("-" * 60)
     print(outlier_summary.to_string())
 
     high_out = df[df["predicted_performance_tier"] == "High Outlier"][
@@ -394,10 +403,10 @@ def print_crosstabs(df: pd.DataFrame) -> None:
     ]
 
     for label, size_col, model_col in approaches:
-        print("\n" + "═" * 70)
-        print(f"PRACTICE COUNT CROSSTAB — {label} Approach")
+        print("\n" + "-" * 70)
+        print(f"PRACTICE COUNT CROSSTAB -- {label} Approach")
         print("  Rows = Size  |  Columns = Model")
-        print("═" * 70)
+        print("-" * 70)
         ct = pd.crosstab(
             df[size_col],
             df[model_col],
@@ -407,9 +416,9 @@ def print_crosstabs(df: pd.DataFrame) -> None:
         print(ct.to_string())
 
     # Performance tier breakdown within rules archetypes
-    print("\n" + "═" * 70)
+    print("\n" + "-" * 70)
     print("PERFORMANCE TIER BREAKDOWN WITHIN RULES ARCHETYPES")
-    print("═" * 70)
+    print("-" * 70)
     pt = pd.crosstab(
         df["archetype_size_rules"] + " | " + df["archetype_model_rules"],
         df["predicted_performance_tier"],
@@ -425,9 +434,9 @@ def print_crosstabs(df: pd.DataFrame) -> None:
 
 def print_archetype_profiles(df: pd.DataFrame) -> None:
     """Summarise key metrics for each rules-based size × model cell."""
-    print("\n" + "═" * 70)
-    print("ARCHETYPE PROFILES — Mean key metrics (Rules-Based)")
-    print("═" * 70)
+    print("\n" + "-" * 70)
+    print("ARCHETYPE PROFILES -- Mean key metrics (Rules-Based)")
+    print("-" * 70)
     profile = (
         df.groupby(["archetype_size_rules", "archetype_model_rules"], observed=True)
         .agg(
