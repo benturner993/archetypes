@@ -19,9 +19,9 @@ N/A zone enforcement (per framework slide):
 Data notes (synthetic master.csv):
   - nooftreatmentitems_nhs_standard / _referral columns are all zero.
     NHS income is taken directly from the nhsincome column.
-  - countof_snareid and chargeprice_private_referral are all zero.
-    Specialist/Referral Hub is proxied via hygienist presence + private
-    income intensity.
+    - Specialist/Referral Hub uses noofpatients_private_referral +
+    noofpatients_nhs_referral: practices in the top quartile of total
+    referred patient volume are flagged as specialist.
 """
 
 import warnings
@@ -69,16 +69,19 @@ def load_and_engineer(path: str = "master.csv") -> pd.DataFrame:
     df["income_per_surgery"] = df["total_income_est"]   / df["numberofsurgeries"].replace(0, np.nan)
     df["nhs_income_per_dentist"] = df["nhsincome"]      / df["position_dentist"].replace(0, np.nan)
 
-    # ── Specialist proxy (hygienist presence + private intensity) ─────────────
+    # ── Specialist flag — referral patient volume ─────────────────────────────
+    # Practices in the top quartile of total referred patient volume are
+    # classified as Specialist/Referral Hub candidates.  This uses direct
+    # referral data rather than proxies.
     df["has_hygienist"]            = df["position_hygienist"] > 0
     df["private_income_per_chair"] = df["private_income"] / df["numberofchairs"].replace(0, np.nan)
 
-    # High private intensity = top quartile of private income per chair
-    hi_private_thresh = df["private_income_per_chair"].quantile(0.75)
-    df["high_private_intensity"] = df["private_income_per_chair"] >= hi_private_thresh
-
-    # Specialist flag: hygienist present AND high private intensity
-    df["specialist_flag"] = df["has_hygienist"] & df["high_private_intensity"]
+    df["total_referral_patients"] = (
+        df["noofpatients_private_referral"].fillna(0)
+        + df["noofpatients_nhs_referral"].fillna(0)
+    )
+    referral_threshold = df["total_referral_patients"].quantile(0.75)
+    df["specialist_flag"] = df["total_referral_patients"] >= referral_threshold
 
     return df
 
@@ -329,8 +332,10 @@ def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     df["private_share_score"]     = _pct_rank(1 - df["nhs_share"].fillna(0))
     df["private_intensity_score"] = _pct_rank(df["private_income_per_chair"])
     df["nhs_income_score"]               = _pct_rank(df["nhsincome"])
-    df["specialist_score"]        = _pct_rank(df["specialist_flag"].astype(float) * 0.5
-                                              + df["private_income_per_chair"].rank(pct=True).fillna(0) * 0.5)
+    # Specialist score: referral volume (70%) + private income per chair (30%)
+    referral_norm = df["total_referral_patients"].rank(pct=True).fillna(0)
+    pic_norm      = df["private_income_per_chair"].rank(pct=True).fillna(0)
+    df["specialist_score"]        = _pct_rank(0.7 * referral_norm + 0.3 * pic_norm)
     df["anti_specialist_score"]   = 100 - df["specialist_score"]
     df["balance_score"]           = (
         1 - (df["nhs_share"].fillna(0.5) - 0.5).abs() / 0.5
@@ -493,7 +498,7 @@ def main(input_path: str = "master.csv", output_path: str = "master_archetypes.c
         "unique_staff_ids", "private_income", "nhs_income_est", "total_income_est",
         "nhs_share", "nhsincome", "nooftreatmentitems",
         "items_per_surgery", "income_per_surgery",
-        "has_hygienist", "specialist_flag",
+        "total_referral_patients", "has_hygienist", "specialist_flag",
         "archetype_size_rules", "archetype_model_rules", "archetype_rules",
         "cluster_size_id", "cluster_model_id",
         "archetype_size_clust", "archetype_model_clust", "archetype_clust",
