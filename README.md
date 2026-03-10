@@ -14,11 +14,11 @@ A two-stage analytical pipeline that:
 | `eda_practices.ipynb` | Exploratory analysis across five operational dimensions |
 | `01_rules_based.ipynb` | Approach 1: deterministic threshold classification |
 | `02_clustering.ipynb` | Approach 2: unsupervised K-Means classification |
-| `03_modelling.ipynb` | Approach 3: XGBoost income modelling + outlier detection |
+| `03_scoring.ipynb` | Approach 3: composite affinity scoring (0-100 per archetype) |
 | `archetype_analysis.py` | Standalone script that runs all three approaches in sequence |
 | `archetypes_rules.csv` | Output from `01_rules_based.ipynb` |
 | `archetypes_clustering.csv` | Output from `02_clustering.ipynb` |
-| `archetypes_modelling.csv` | Output from `03_modelling.ipynb` |
+| `archetypes_scoring.csv` | Output from `03_scoring.ipynb` |
 | `master_archetypes.csv` | Combined output from `archetype_analysis.py` |
 | `create_data.py` | Synthetic data generator (development/testing only) |
 | `create_metadata.py` | Schema reference (development/testing only) |
@@ -56,10 +56,10 @@ Any extra columns in your export are ignored. Missing columns will default to ze
 ### 2 · Install dependencies
 
 ```bash
-pip install pandas numpy matplotlib seaborn scikit-learn xgboost
+pip install pandas numpy matplotlib seaborn scikit-learn
 ```
 
-Tested with: `pandas 2.0.3` · `numpy 1.21.2` · `matplotlib 3.7.5` · `seaborn 0.11.1` · `scikit-learn 1.3.2` · `xgboost 2.1.4`
+Tested with: `pandas 2.0.3` · `numpy 1.21.2` · `matplotlib 3.7.5` · `seaborn 0.11.1` · `scikit-learn 1.3.2`
 
 ### 3 · Choose how to run the analysis
 
@@ -79,7 +79,7 @@ Each notebook saves its own output CSV:
 |----------|-------------|-------------|
 | `01_rules_based.ipynb` | `archetypes_rules.csv` | `archetype_size`, `archetype_model`, `archetype_rules` |
 | `02_clustering.ipynb` | `archetypes_clustering.csv` | `cluster_size_id`, `cluster_model_id`, `archetype_size`, `archetype_model` |
-| `03_modelling.ipynb` | `archetypes_modelling.csv` | `predicted_income`, `income_residual`, `residual_z`, `predicted_performance_tier` |
+| `03_scoring.ipynb` | `archetypes_scoring.csv` | `size_index`, `affinity_*`, `affinity_confidence_gap`, `archetype_blend` |
 
 **Option B — Run all three at once via the script**
 
@@ -175,6 +175,12 @@ NHS_VALUE_PER_UDA = 28.0   # update to match current contracted rate
 
 The number of clusters (default 4 for both size and model) is controlled by the `n_clusters` argument in `apply_clustering()`. Increase to 5 if you need finer granularity, or reduce to 3 for a simpler view.
 
+### Scoring weights
+
+The affinity weights for each model archetype are defined in the `WEIGHTS` dictionary in `03_scoring.ipynb` and in `AFFINITY_WEIGHTS` in `archetype_analysis.py`. Weights within each archetype must sum to 1.0. The blend threshold (default: confidence gap < 10 points) is set by `LOW_CONFIDENCE_THRESHOLD`.
+
+The size index weights are in `SIZE_WEIGHTS` / `SIZE_INDEX_WEIGHTS`. Size bands are always cut at portfolio quartiles, so the band counts remain balanced when the distribution shifts with new data.
+
 ---
 
 ## EDA notebook sections (`eda_practices.ipynb`)
@@ -194,4 +200,4 @@ The number of clusters (default 4 for both size and model) is controlled by the 
 |----------|----------|-------------|
 | `01_rules_based.ipynb` | Hard-coded thresholds on surgeries and NHS share | Default classification; easy to explain to stakeholders; stable across data refreshes |
 | `02_clustering.ipynb` | K-Means on standardised features (k=4) | Validate rules; discover natural groupings; explore if real data reveals different structure |
-| `03_modelling.ipynb` | XGBoost income model + z-score outlier flagging | Identify over- and under-performers; understand which features drive income; prioritise interventions |
+| `03_scoring.ipynb` | Composite affinity scoring (0-100 per archetype per practice) | Richest classification output; surfaces boundary/blend practices; fully tunable weights; no ML required |

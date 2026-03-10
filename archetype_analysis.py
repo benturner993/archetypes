@@ -1,29 +1,27 @@
 """
 archetype_analysis.py
-─────────────────────
+---------------------
 Assigns every practice in master.csv to a position in the Archetypes Progress
-framework: a 4×4 matrix of Size × Model.
+framework: a 4x4 matrix of Size x Model.
 
 Size bands   : Small/Foundation | Medium/Core | Large/Advanced | Flagship
 Model bands  : NHS Led | Balanced Mixed | Private Led Mixed | Specialist/Referral Hub
 
 Three labelling strategies are implemented:
-  1. apply_rules()      – deterministic heuristics derived from the framework
-  2. apply_clustering() – unsupervised K-Means (size and model independently)
-  3. apply_modeling()   – regression-based performance tier + outlier flagging
+  1. apply_rules()    - deterministic heuristics derived from the framework
+  2. apply_clustering() - unsupervised K-Means (size and model independently)
+  3. apply_scoring()  - composite affinity scoring (0-100 per archetype)
 
 N/A zone enforcement (per framework slide):
-  NHS Led practices cannot be Large/Advanced or Flagship — they are
+  NHS Led practices cannot be Large/Advanced or Flagship -- they are
   reclassified to Balanced Mixed if the size rule fires at those levels.
 
 Data notes (synthetic master.csv):
-  • nooftreatmentitems_nhs_standard / _referral columns are all zero.
-    NHS activity is proxied via UDA counts × £28 (standard UDA rate).
-  • countof_snareid and chargeprice_private_referral are all zero.
+  - nooftreatmentitems_nhs_standard / _referral columns are all zero.
+    NHS activity is proxied via UDA counts x 28 (standard UDA rate).
+  - countof_snareid and chargeprice_private_referral are all zero.
     Specialist/Referral Hub is proxied via hygienist presence + private
     income intensity.
-  • nps is constant (47.7) across all practices and is excluded from
-    modelling targets; total estimated income is used instead.
 """
 
 import warnings
@@ -31,10 +29,6 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import cross_val_score
-from sklearn.metrics import r2_score
-from xgboost import XGBRegressor
 
 warnings.filterwarnings("ignore")
 RANDOM_STATE = 42
@@ -265,124 +259,134 @@ def apply_clustering(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 3 · MODELLING-BASED APPROACH
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 3 · COMPOSITE ARCHETYPE SCORING
+# ==============================================================================
 
-def _encode_region(df: pd.DataFrame) -> pd.DataFrame:
-    """One-hot encode region; drop first to avoid dummy trap."""
-    dummies = pd.get_dummies(df["region"], prefix="region", drop_first=True, dtype=float)
-    return pd.concat([df, dummies], axis=1)
+# Affinity weights per model archetype.
+# Each key must match a component column name computed in apply_scoring().
+# Weights within each archetype must sum to 1.0.
+AFFINITY_WEIGHTS = {
+    "NHS Led": {
+        "nhs_share_score":       0.50,
+        "uda_score":             0.30,
+        "anti_specialist_score": 0.20,
+    },
+    "Balanced Mixed": {
+        "balance_score":           0.60,
+        "anti_specialist_score":   0.20,
+        "private_intensity_score": 0.10,
+        "uda_score":               0.10,
+    },
+    "Private Led Mixed": {
+        "private_share_score":     0.45,
+        "private_intensity_score": 0.35,
+        "anti_specialist_score":   0.20,
+    },
+    "Specialist/Referral Hub": {
+        "specialist_score":        0.40,
+        "private_intensity_score": 0.35,
+        "private_share_score":     0.25,
+    },
+}
+
+# Size index weights (components ranked by percentile, then combined)
+SIZE_INDEX_WEIGHTS = {
+    "numberofsurgeries":        0.40,
+    "unique_staff_ids":         0.40,
+    "contractualhours_dentist": 0.20,
+}
+
+LOW_CONFIDENCE_THRESHOLD = 10  # gap < 10 points = blend/boundary practice
 
 
-def apply_modeling(df: pd.DataFrame) -> pd.DataFrame:
+def _pct_rank(series: pd.Series) -> pd.Series:
+    """Percentile rank scaled to 0-100; NaN assigned neutral 50."""
+    return series.rank(pct=True).fillna(0.5) * 100
+
+
+def apply_scoring(df: pd.DataFrame) -> pd.DataFrame:
     """
+    Assigns a 0-100 affinity score to each practice for each model archetype.
+    The highest-scoring archetype wins. Size is determined by a weighted
+    composite size index cut at portfolio quartiles.
+
     Adds columns:
-      predicted_income           – OLS-predicted total income
-      income_residual            – Actual − predicted (£)
-      predicted_performance_tier – 'High Outlier' / 'Expected' / 'Low Outlier'
-                                   based on standardised residual (|z| > 2)
-
-    Also prints:
-      - Linear Regression: coefficients + R2 for total income
-      - XGBoost: feature importances for total income
-      - Outlier summary
-
-    Note: NPS is constant in the synthetic data and cannot be modelled.
-    total_income_est is used as the performance target instead.
+      size_index               - Weighted percentile-rank size index (0-100)
+      archetype_size_score     - Size band from size index quartile cut
+      affinity_<archetype>     - 0-100 affinity score for each model archetype
+                                 (column name sanitised: spaces/slashes -> _)
+      archetype_model_score    - Model band (highest affinity, NA zones enforced)
+      affinity_primary         - Highest affinity score
+      affinity_secondary       - Second-highest affinity score
+      affinity_confidence_gap  - Primary minus secondary (higher = clearer fit)
+      archetype_blend          - True if confidence gap < LOW_CONFIDENCE_THRESHOLD
+      archetype_score          - Combined 'Size | Model' label
     """
     df = df.copy()
-    df = _encode_region(df)
 
-    region_dummies = [c for c in df.columns if c.startswith("region_")]
-    base_features  = [
-        "numberofsurgeries",
-        "unique_staff_ids",
-        "uda",
-        "position_hygienist",
-        "contractualhours_dentist",
-    ] + region_dummies
+    # ── Signal components (0-100 percentile scale) ────────────────────────────
+    df["nhs_share_score"]         = _pct_rank(df["nhs_share"])
+    df["private_share_score"]     = _pct_rank(1 - df["nhs_share"].fillna(0))
+    df["private_intensity_score"] = _pct_rank(df["private_income_per_chair"])
+    df["uda_score"]               = _pct_rank(df["uda"])
+    df["specialist_score"]        = _pct_rank(df["specialist_flag"].astype(float) * 0.5
+                                              + df["private_income_per_chair"].rank(pct=True).fillna(0) * 0.5)
+    df["anti_specialist_score"]   = 100 - df["specialist_score"]
+    df["balance_score"]           = (
+        1 - (df["nhs_share"].fillna(0.5) - 0.5).abs() / 0.5
+    ) * 100
 
-    X = df[base_features].fillna(0).values
-    y = df["total_income_est"].values
-
-    # ── Linear Regression ────────────────────────────────────────────────────
-    lr = LinearRegression()
-    lr.fit(X, y)
-    y_pred_lr     = lr.predict(X)
-    r2_lr         = r2_score(y, y_pred_lr)
-    cv_r2_lr      = cross_val_score(lr, X, y, cv=5, scoring="r2").mean()
-
-    print("\n" + "-" * 60)
-    print("LINEAR REGRESSION -- Total income drivers")
-    print("-" * 60)
-    coef_df = (
-        pd.DataFrame({"feature": base_features, "coefficient": lr.coef_})
-        .sort_values("coefficient", key=abs, ascending=False)
+    # ── Affinity scores ───────────────────────────────────────────────────────
+    affinity_matrix = pd.DataFrame(
+        {
+            arch: sum(df[comp] * weight for comp, weight in weights.items())
+            for arch, weights in AFFINITY_WEIGHTS.items()
+        },
+        index=df.index,
     )
-    print(coef_df.to_string(index=False))
-    print(f"\nIntercept : £{lr.intercept_:,.0f}")
-    print(f"R²        : {r2_lr:.3f}  (5-fold CV R²: {cv_r2_lr:.3f})")
 
-    # ── XGBoost ──────────────────────────────────────────────────────────────
-    xgb = XGBRegressor(
-        n_estimators=300,
-        learning_rate=0.05,
-        max_depth=4,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=RANDOM_STATE,
-        verbosity=0,
+    # Sanitised column names for output
+    for arch in MODEL_LABELS:
+        col = "affinity_" + arch.lower().replace("/", "_").replace(" ", "_")
+        df[col] = affinity_matrix[arch].round(1)
+
+    df["archetype_model_score"]   = affinity_matrix.idxmax(axis=1)
+    df["affinity_primary"]        = affinity_matrix.max(axis=1).round(1)
+    df["affinity_secondary"]      = affinity_matrix.apply(
+        lambda row: row.nlargest(2).iloc[1], axis=1
+    ).round(1)
+    df["affinity_confidence_gap"] = (df["affinity_primary"] - df["affinity_secondary"]).round(1)
+    df["archetype_blend"]         = df["affinity_confidence_gap"] < LOW_CONFIDENCE_THRESHOLD
+
+    # ── Size index ────────────────────────────────────────────────────────────
+    df["size_index"] = sum(
+        _pct_rank(df[col]) * weight for col, weight in SIZE_INDEX_WEIGHTS.items()
     )
-    xgb.fit(X, y)
-    cv_r2_xgb = cross_val_score(xgb, X, y, cv=5, scoring="r2").mean()
-
-    print("\n" + "-" * 60)
-    print("XGBOOST -- Feature importances for total income")
-    print("-" * 60)
-    imp_df = (
-        pd.DataFrame({"feature": base_features, "importance": xgb.feature_importances_})
-        .sort_values("importance", ascending=False)
+    q25, q50, q75 = df["size_index"].quantile([0.25, 0.50, 0.75])
+    df["archetype_size_score"] = pd.cut(
+        df["size_index"],
+        bins=[-np.inf, q25, q50, q75, np.inf],
+        labels=SIZE_LABELS,
     )
-    print(imp_df.to_string(index=False))
-    print(f"\n5-fold CV R2 : {cv_r2_xgb:.3f}")
 
-    # ── Outlier detection ────────────────────────────────────────────────────
-    # Use XGBoost predictions as the performance baseline
-    y_pred_rf    = xgb.predict(X)
-    residuals    = y - y_pred_rf
-    resid_z      = (residuals - residuals.mean()) / residuals.std()
+    # ── N/A zone enforcement ──────────────────────────────────────────────────
+    df["archetype_model_score"] = enforce_na_zones(
+        df["archetype_size_score"].astype(str), df["archetype_model_score"]
+    )
+    df["archetype_score"] = df["archetype_size_score"].astype(str) + " | " + df["archetype_model_score"]
 
-    tier = pd.Series("Expected", index=df.index)
-    tier[resid_z >  2] = "High Outlier"
-    tier[resid_z < -2] = "Low Outlier"
-
-    y_pred_xgb = y_pred_rf  # alias for clarity in downstream code
-    df["predicted_income"]            = np.round(y_pred_xgb, 2)
-    df["income_residual"]             = np.round(residuals, 2)
-    df["predicted_performance_tier"]  = tier
-
-    outlier_summary = tier.value_counts()
+    # ── Summary print ─────────────────────────────────────────────────────────
     print("\n" + "-" * 60)
-    print("OUTLIER SUMMARY (|z-residual| > 2)")
+    print("COMPOSITE SCORING -- Model band distribution")
     print("-" * 60)
-    print(outlier_summary.to_string())
-
-    high_out = df[df["predicted_performance_tier"] == "High Outlier"][
-        ["practicename", "archetype_size_rules", "archetype_model_rules",
-         "total_income_est", "predicted_income", "income_residual"]
-    ].head(10)
-    if len(high_out):
-        print("\nTop High Outliers (practices punching above their predicted income):")
-        print(high_out.to_string(index=False))
-
-    low_out = df[df["predicted_performance_tier"] == "Low Outlier"][
-        ["practicename", "archetype_size_rules", "archetype_model_rules",
-         "total_income_est", "predicted_income", "income_residual"]
-    ].head(10)
-    if len(low_out):
-        print("\nTop Low Outliers (practices underperforming their predicted income):")
-        print(low_out.to_string(index=False))
+    print(df["archetype_model_score"].value_counts().reindex(MODEL_LABELS).to_string())
+    print("\n" + "-" * 60)
+    print("COMPOSITE SCORING -- Confidence gap summary")
+    print("-" * 60)
+    print(df["affinity_confidence_gap"].describe().round(1).to_string())
+    n_blend = df["archetype_blend"].sum()
+    print(f"\nBlend practices (gap < {LOW_CONFIDENCE_THRESHOLD}): {n_blend} ({n_blend/len(df)*100:.1f}%)")
 
     return df
 
@@ -398,8 +402,9 @@ def print_crosstabs(df: pd.DataFrame) -> None:
     model_order = MODEL_LABELS
 
     approaches = [
-        ("Rules-Based",   "archetype_size_rules",  "archetype_model_rules"),
-        ("Clustering",    "archetype_size_clust",   "archetype_model_clust"),
+        ("Rules-Based",   "archetype_size_rules",        "archetype_model_rules"),
+        ("Clustering",    "archetype_size_clust",         "archetype_model_clust"),
+        ("Scoring",       "archetype_size_score",         "archetype_model_score"),
     ]
 
     for label, size_col, model_col in approaches:
@@ -408,24 +413,24 @@ def print_crosstabs(df: pd.DataFrame) -> None:
         print("  Rows = Size  |  Columns = Model")
         print("-" * 70)
         ct = pd.crosstab(
-            df[size_col],
+            df[size_col].astype(str),
             df[model_col],
             margins=True,
             margins_name="TOTAL",
         ).reindex(index=size_order + ["TOTAL"], columns=model_order + ["TOTAL"], fill_value=0)
         print(ct.to_string())
 
-    # Performance tier breakdown within rules archetypes
+    # Blend flag breakdown
     print("\n" + "-" * 70)
-    print("PERFORMANCE TIER BREAKDOWN WITHIN RULES ARCHETYPES")
+    print("BLEND PRACTICES (low confidence gap) BY SCORING ARCHETYPE")
     print("-" * 70)
-    pt = pd.crosstab(
-        df["archetype_size_rules"] + " | " + df["archetype_model_rules"],
-        df["predicted_performance_tier"],
+    blend_ct = pd.crosstab(
+        df["archetype_score"],
+        df["archetype_blend"].map({True: "Blend", False: "Clear"}),
         margins=True,
         margins_name="TOTAL",
     )
-    print(pt.to_string())
+    print(blend_ct.to_string())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -433,31 +438,31 @@ def print_crosstabs(df: pd.DataFrame) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def print_archetype_profiles(df: pd.DataFrame) -> None:
-    """Summarise key metrics for each rules-based size × model cell."""
-    print("\n" + "-" * 70)
-    print("ARCHETYPE PROFILES -- Mean key metrics (Rules-Based)")
-    print("-" * 70)
-    profile = (
-        df.groupby(["archetype_size_rules", "archetype_model_rules"], observed=True)
-        .agg(
-            n=("practicekey", "count"),
-            avg_surgeries=("numberofsurgeries", "mean"),
-            avg_staff=("unique_staff_ids", "mean"),
-            avg_private_income=("private_income", "mean"),
-            avg_nhs_income=("nhs_income_est", "mean"),
-            avg_total_income=("total_income_est", "mean"),
-            avg_nhs_share_pct=("nhs_share", lambda x: x.mean() * 100),
-            avg_treatment_items=("nooftreatmentitems", "mean"),
-            avg_uda=("uda", "mean"),
-            pct_high_outlier=(
-                "predicted_performance_tier",
-                lambda x: (x == "High Outlier").mean() * 100,
-            ),
+    """Summarise key metrics for each rules-based and scoring size x model cell."""
+    for approach_label, size_col, model_col in [
+        ("Rules-Based", "archetype_size_rules",  "archetype_model_rules"),
+        ("Scoring",     "archetype_size_score",   "archetype_model_score"),
+    ]:
+        print("\n" + "-" * 70)
+        print(f"ARCHETYPE PROFILES -- Mean key metrics ({approach_label})")
+        print("-" * 70)
+        profile = (
+            df.groupby([size_col, model_col], observed=True)
+            .agg(
+                n=("practicekey", "count"),
+                avg_surgeries=("numberofsurgeries", "mean"),
+                avg_staff=("unique_staff_ids", "mean"),
+                avg_private_income=("private_income", "mean"),
+                avg_nhs_income=("nhs_income_est", "mean"),
+                avg_total_income=("total_income_est", "mean"),
+                avg_nhs_share_pct=("nhs_share", lambda x: x.mean() * 100),
+                avg_treatment_items=("nooftreatmentitems", "mean"),
+                avg_uda=("uda", "mean"),
+            )
+            .round(1)
+            .sort_index()
         )
-        .round(1)
-        .sort_index()
-    )
-    print(profile.to_string())
+        print(profile.to_string())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -474,13 +479,17 @@ def main(input_path: str = "master.csv", output_path: str = "master_archetypes.c
     print("Applying clustering-based classification …")
     df = apply_clustering(df)
 
-    print("Applying modelling-based classification …")
-    df = apply_modeling(df)
+    print("Applying composite scoring classification …")
+    df = apply_scoring(df)
 
     print_crosstabs(df)
     print_archetype_profiles(df)
 
     # ── Save enriched dataset ─────────────────────────────────────────────────
+    affinity_cols = [
+        c for c in df.columns if c.startswith("affinity_")
+        and c not in ("affinity_primary", "affinity_secondary", "affinity_confidence_gap")
+    ]
     output_cols = [
         "practicekey", "practicename", "region", "numberofsurgeries",
         "unique_staff_ids", "private_income", "nhs_income_est", "total_income_est",
@@ -490,8 +499,9 @@ def main(input_path: str = "master.csv", output_path: str = "master_archetypes.c
         "archetype_size_rules", "archetype_model_rules", "archetype_rules",
         "cluster_size_id", "cluster_model_id",
         "archetype_size_clust", "archetype_model_clust", "archetype_clust",
-        "predicted_income", "income_residual", "predicted_performance_tier",
-    ]
+        "size_index", "archetype_size_score", "archetype_model_score", "archetype_score",
+        "affinity_primary", "affinity_secondary", "affinity_confidence_gap", "archetype_blend",
+    ] + affinity_cols
     df[output_cols].to_csv(output_path, index=False)
     print(f"\nSaved enriched file → {output_path}  ({len(df):,} rows, {len(output_cols)} columns)")
 
